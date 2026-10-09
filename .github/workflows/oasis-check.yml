@@ -1,0 +1,80 @@
+name: OASIS reachability check
+
+on:​
+  workflow_dispatch:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    env:
+      BASE: https://www.oasis.oati.com/woa/docs/PPW/PPWdocs
+      PAGES: pacificorpcliaq.htm pacificorpcliaq1.htm pacificorpcliaq2.htm pacificorpcliaq3.htm pacificorpcliaq4.htm pacificorpcliaqT2.htm
+      BROWSER_UA: "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:131.0) Gecko/20100101 Firefox/131.0"
+
+    steps:
+      - name: DNS lookup
+        run: |
+          for h in www.oasis.oati.com oasis.oati.com; do
+            echo "== $h"
+            getent hosts "$h" || echo " does not resolve"
+          done
+
+      - name: Detailed connection log (first page)
+        continue-on-error: true
+        run: |
+          curl -v --max-time 60 -o /dev/null "$BASE/pacificorpcliaq.htm" 2>&1 | head -60
+
+      - name: Fetch each page with curl
+        run: |
+          mkdir -p pages
+          for ua in default browser; do
+            for scheme in https http; do
+              echo "== scheme=$scheme, user agent=$ua"
+              for p in $PAGES; do
+                url="$scheme://www.oasis.oati.com/woa/docs/PPW/PPWdocs/$p"
+                if [ "$ua" = browser ]; then uaopt=(-A "$BROWSER_UA"); else uaopt=(); fi
+                result=$(curl -sS "${uaopt[@]}" -o "pages/${scheme}-${ua}-${p}" \
+                  -w "%{http_code}, %{size_download} bytes, %{time_total}s" \
+                  --max-time 60 --retry 2 --retry-all-errors "$url" 2>&1) || true
+                echo " $p: $result"
+                sleep 2
+              done
+            done
+          done
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Fetch each page with aiohttp (as the archiver would)
+        run: |
+          pip install --quiet aiohttp
+          python - <<'EOF'
+          import asyncio, os, aiohttp
+
+          base = os.environ["BASE"]
+          pages = os.environ["PAGES"].split()
+
+          async def main():
+              timeout = aiohttp.ClientTimeout(total=60)
+              async with aiohttp.ClientSession(timeout=timeout) as session:
+                  for p in pages:
+                      try:
+                          async with session.get(f"{base}/{p}") as r:
+                              body = await r.read()
+                              print(f" {p}: {r.status}, {len(body)} bytes")
+                      except Exception as e:
+                          print(f" {p}: FAILED {type(e).__name__}: {e}")
+                      await asyncio.sleep(2)
+
+          asyncio.run(main())
+          EOF
+
+      - name: Save fetched pages
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fetched-pages
+          path: pages/
+          if-no-files-found: warn
