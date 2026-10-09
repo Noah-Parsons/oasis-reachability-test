@@ -6,40 +6,25 @@ on:
 jobs:
   check:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     env:
       BASE: https://www.oasis.oati.com/woa/docs/PPW/PPWdocs
       PAGES: pacificorpcliaq.htm pacificorpcliaq1.htm pacificorpcliaq2.htm pacificorpcliaq3.htm pacificorpcliaq4.htm pacificorpcliaqT2.htm
-      BROWSER_UA: "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:131.0) Gecko/20100101 Firefox/131.0"
+      OATI_CA: certs/oati-webcares-server-issuing-ca-2025.pem
 
     steps:
-      - name: DNS lookup
-        run: |
-          for h in www.oasis.oati.com oasis.oati.com; do
-            echo "== $h"
-            getent hosts "$h" || echo "   does not resolve"
-          done
+      - name: Check out repository
+        uses: actions/checkout@v4
 
-      - name: Detailed connection log (first page)
-        continue-on-error: true
-        run: |
-          curl -v --max-time 60 -o /dev/null "$BASE/pacificorpcliaq.htm" 2>&1 | head -60
-
-      - name: Fetch each page with curl
+      - name: Fetch each page with curl, trusting OATI's intermediate
         run: |
           mkdir -p pages
-          for ua in default browser; do
-            for scheme in https http; do
-              echo "== scheme=$scheme, user agent=$ua"
-              for p in $PAGES; do
-                url="$scheme://www.oasis.oati.com/woa/docs/PPW/PPWdocs/$p"
-                if [ "$ua" = browser ]; then uaopt=(-A "$BROWSER_UA"); else uaopt=(); fi
-                result=$(curl -sS "${uaopt[@]}" -o "pages/${scheme}-${ua}-${p}" \
-                  -w "%{http_code}, %{size_download} bytes, %{time_total}s" \
-                  --max-time 60 --retry 2 --retry-all-errors "$url" 2>&1) || true
-                echo "   $p: $result"
-                sleep 2
-              done
-            done
+          for p in $PAGES; do
+            result=$(curl -sS --cacert "$OATI_CA" -o "pages/$p" \
+              -w "%{http_code}, %{size_download} bytes, %{time_total}s" \
+              --max-time 60 --retry 3 --retry-all-errors "$BASE/$p" 2>&1) || true
+            echo "   $p: $result"
+            sleep 2
           done
 
       - name: Set up Python
@@ -51,17 +36,21 @@ jobs:
         run: |
           pip install --quiet aiohttp
           python - <<'EOF'
-          import asyncio, os, aiohttp
+          import asyncio, os, ssl, aiohttp
 
           base = os.environ["BASE"]
           pages = os.environ["PAGES"].split()
+
+          # Trust OATI's intermediate certificate for this site only
+          ctx = ssl.create_default_context(cafile=os.environ["OATI_CA"])
+          ctx.verify_flags |= ssl.VERIFY_X509_PARTIAL_CHAIN
 
           async def main():
               timeout = aiohttp.ClientTimeout(total=60)
               async with aiohttp.ClientSession(timeout=timeout) as session:
                   for p in pages:
                       try:
-                          async with session.get(f"{base}/{p}") as r:
+                          async with session.get(f"{base}/{p}", ssl=ctx) as r:
                               body = await r.read()
                               print(f"   {p}: {r.status}, {len(body)} bytes")
                       except Exception as e:
@@ -71,10 +60,22 @@ jobs:
           asyncio.run(main())
           EOF
 
+      - name: Confirm the pages contain the queue
+        run: |
+          declare -A prefix=(
+            [pacificorpcliaq.htm]=TCS [pacificorpcliaq1.htm]=C1
+            [pacificorpcliaq2.htm]=C2 [pacificorpcliaq3.htm]=C3
+            [pacificorpcliaq4.htm]=C4 [pacificorpcliaqT2.htm]=T2
+          )
+          for p in $PAGES; do
+            n=$(grep -oE ">\s*${prefix[$p]}-[0-9]+\s*<" "pages/$p" 2>/dev/null | sort -u | wc -l)
+            asof=$(grep -oE '[0-9]{1,2}/[0-9]{1,2}/20[0-9]{2}' "pages/$p" 2>/dev/null | head -1)
+            echo "   $p: $n requests, first date on page: ${asof:-none}"
+          done
+
       - name: Save fetched pages
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: fetched-pages
           path: pages/
-          if-no-files-found: warn
