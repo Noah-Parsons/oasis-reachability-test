@@ -1,6 +1,6 @@
 name: OASIS reachability check
 
-on:​
+on:
   workflow_dispatch:
 
 jobs:
@@ -16,7 +16,7 @@ jobs:
         run: |
           for h in www.oasis.oati.com oasis.oati.com; do
             echo "== $h"
-            getent hosts "$h" || echo " does not resolve"
+            getent hosts "$h" || echo "   does not resolve"
           done
 
       - name: Detailed connection log (first page)
@@ -36,7 +36,7 @@ jobs:
                 result=$(curl -sS "${uaopt[@]}" -o "pages/${scheme}-${ua}-${p}" \
                   -w "%{http_code}, %{size_download} bytes, %{time_total}s" \
                   --max-time 60 --retry 2 --retry-all-errors "$url" 2>&1) || true
-                echo " $p: $result"
+                echo "   $p: $result"
                 sleep 2
               done
             done
@@ -63,9 +63,9 @@ jobs:
                       try:
                           async with session.get(f"{base}/{p}") as r:
                               body = await r.read()
-                              print(f" {p}: {r.status}, {len(body)} bytes")
+                              print(f"   {p}: {r.status}, {len(body)} bytes")
                       except Exception as e:
-                          print(f" {p}: FAILED {type(e).__name__}: {e}")
+                          print(f"   {p}: FAILED {type(e).__name__}: {e}")
                       await asyncio.sleep(2)
 
           asyncio.run(main())
